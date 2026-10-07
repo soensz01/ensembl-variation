@@ -481,7 +481,7 @@ sub look_for_slice_start {
   
   my ($slice_start, $slice_end, $slice ) = $self->_var2transcript_slice_coords($tr, $tv, $vf);
   ## set new HGVS string
-  if($slice_start)
+  if(defined $slice_start)
   {
     ## add cache of seq/ pos required by c, n and p 
     $self->{_slice_start} = $slice_start;
@@ -1407,13 +1407,23 @@ sub hgvs_transcript {
 
   return undef if (($self->{_slice}->end - $self->{_slice}->start + 1) < ($self->{_slice_end} + $offset_to_add));
   #return undef if (length($self->{_slice}->seq()) < ($self->{_slice_end} + $offset_to_add));
+
+  ## _slice_start/_slice_end are transcript-relative (may be <1 or > transcript
+  ## length for promoter/downstream positions); translate them into coordinates
+  ## relative to $self->{_slice}'s own sequence (which may have been expanded
+  ## beyond the transcript to reach such positions) for ref-allele extraction,
+  ## while keeping the transcript-relative values as the displayed position.
+  my $slice_coord_offset = $self->{_slice_5prime_expansion} || 0;
+  my $display_start = $self->{_slice_start} + $offset_to_add;
+  my $display_end   = $self->{_slice_end} + $offset_to_add;
+
   $hgvs_notation = hgvs_variant_notation(
     $variation_feature_sequence,    ### alt_allele,
     $self->{_slice}->seq(),                             ### using this to extract ref allele
-    $self->{_slice_start} + $offset_to_add,
-    $self->{_slice_end} + $offset_to_add,
-    "",
-    "",
+    $display_start + $slice_coord_offset,
+    $display_end + $slice_coord_offset,
+    $display_start,
+    $display_end,
     $var_name,
     $lookup_order
   );
@@ -1426,7 +1436,6 @@ sub hgvs_transcript {
 
   ## check for the same bases in ref and alt strings before or after the variant
   $hgvs_notation = _clip_alleles($hgvs_notation) unless $hgvs_notation->{'type'} eq 'dup';
-
   print "hgvs transcript type : " . $hgvs_notation->{'type'} . "\n" if $DEBUG == 1;    
   print "Got type: " . $hgvs_notation->{'type'} ." $hgvs_notation->{'ref'} -> $hgvs_notation->{'alt'}\n" if $DEBUG == 1;
 
@@ -1457,10 +1466,10 @@ sub hgvs_transcript {
     $hgvs_notation->{end}   = $hgvs_notation->{start};
   }
   else{
-    $hgvs_notation->{start} = $self->_get_cDNA_position( $hgvs_notation->{start} + $misalignment_offset);
-    $hgvs_notation->{end}   = $same_pos ? $hgvs_notation->{start} : $self->_get_cDNA_position( $hgvs_notation->{end} + $misalignment_offset );
+    $hgvs_notation->{start} = $self->_get_cDNA_position($hgvs_notation->{start} + $misalignment_offset);
+    $hgvs_notation->{end}   = $same_pos ? $hgvs_notation->{start} : $self->_get_cDNA_position($hgvs_notation->{end} + $misalignment_offset);
   }
-  return undef unless defined  $hgvs_notation->{start}  && defined  $hgvs_notation->{end} ;
+  return undef unless defined  $hgvs_notation->{start}  && defined  $hgvs_notation->{end};
 
   # Make sure that start is always less than end
   my ($exon_start_coord, $intron_start_offset) = $hgvs_notation->{start} =~ m/(\-?[0-9]+)\+?(\-?[0-9]+)?/;
@@ -2652,15 +2661,51 @@ sub _var2transcript_slice_coords{
     ($vf_start, $vf_end) = ($tr_vf->start, $tr_vf->end);
   }
 
-  # Return undef if this VariationFeature does not fall within the supplied feature.
-  return undef if (
-    $vf_start  < 1 || 
-    $vf_end    < 1 || 
-    $vf_start  > ($tr_end - $tr_start + 1) || 
-    $vf_end    > ($tr_end - $tr_start + 1)
-  ); 
-  
-  return( $vf_start , $vf_end, $self->_transcript_feature_Slice($tr));
+  # Check for overlap before clamping
+  my $tr_length = $tr_end - $tr_start + 1;
+
+  # If the variant extends outside transcript boundaries, expand the transcript feature slice
+  # to include enough flanking sequence for official HGVS allele normalization.
+  my $min_vf = $vf_start < $vf_end ? $vf_start : $vf_end;
+  my $max_vf = $vf_start > $vf_end ? $vf_start : $vf_end;
+
+  my $ext_5prime = $min_vf < 1 ? (1 - $min_vf) : 0;
+  my $ext_3prime = $max_vf > $tr_length ? ($max_vf - $tr_length) : 0;
+
+  my $feature_slice = $self->_transcript_feature_Slice($tr);
+  $self->{_slice_5prime_expansion} = 0;
+
+  if($ext_5prime || $ext_3prime) {
+    # Pad beyond the variant's own boundary so duplication/3'-shift lookups, which
+    # inspect sequence flanking the variant, have enough context even right at
+    # the edge of the expanded slice.
+    my $flank_padding = 100;
+    my ($orig_start, $orig_end) = ($feature_slice->start, $feature_slice->end);
+
+    # Slice::expand() is strand-aware: both arguments are always given in
+    # feature-relative 5'/3' terms and it internally swaps them for minus-strand
+    # slices, so no manual strand handling is required here.
+    $feature_slice = $feature_slice->expand($ext_5prime + $flank_padding, $ext_3prime + $flank_padding);
+    $feature_slice = $feature_slice->constrain_to_seq_region();
+
+    my $tr_vf = $vf->transfer($feature_slice);
+    return undef unless $tr_vf;
+
+    # Record how many bases now precede transcript position 1 within the expanded
+    # slice (strand-aware, and reflecting any clipping applied by
+    # constrain_to_seq_region near a sequence region boundary) so callers can
+    # translate transcript-relative coordinates (which may be < 1 or > transcript
+    # length) into slice-relative ones for sequence extraction.
+    $self->{_slice_5prime_expansion} = $tr->strand > 0 ?
+      ($orig_start - $feature_slice->start) :
+      ($feature_slice->end - $orig_end);
+
+    # Keep transcript-relative coordinates (which may be < 1 or > transcript length)
+    # while using an expanded slice for reference extraction.
+    return ($vf_start, $vf_end, $feature_slice);
+  }
+
+  return ($vf_start, $vf_end, $feature_slice);
 }
 
 
@@ -2699,10 +2744,29 @@ sub _get_cDNA_position {
   my $exons = $tv->_sorted_exons();
 
   my $n_exons = scalar(@$exons);
-
   my $cdna_position;
+
+  # Handle variants outside transcript boundaries so promoter and downstream coordinates
+  # can still be represented using official HGVS conversion and formatting.
+  if($strand > 0 && $position < $transcript->start()) {
+    my $dist = $transcript->start() - $position;
+    $cdna_position = 1 - $dist;
+  }
+  elsif($strand < 0 && $position > $transcript->end()) {
+    my $dist = $position - $transcript->end();
+    $cdna_position = 1 - $dist;
+  }
+  elsif($strand > 0 && $position > $transcript->end()) {
+    my $dist = $position - $transcript->end();
+    $cdna_position = $transcript->length() + $dist;
+  }
+  elsif($strand < 0 && $position < $transcript->start()) {
+    my $dist = $transcript->start() - $position;
+    $cdna_position = $transcript->length() + $dist;
+  }
+
   # Loop over the exons and get the coordinates of the variation in exon+intron notation
-  for (my $i=0; $i<$n_exons; $i++) {
+  for (my $i=0; $i<$n_exons && !defined($cdna_position); $i++) {
 
     my $exon = $exons->[$i];
     my ($exon_start, $exon_end) = ($exon->{start}, $exon->{end});
@@ -2759,7 +2823,7 @@ sub _get_cDNA_position {
   }
 
   ## this should not happen; potential refseq oddness
-  return undef unless $cdna_position; 
+  return undef unless defined $cdna_position;
  
   # Shift the position to make it relative to the start & stop codons
   my $start_codon  =  $transcript->cdna_coding_start();
@@ -2767,7 +2831,7 @@ sub _get_cDNA_position {
 
   # Disassemble the cDNA coordinate into the exon and intron parts
   ### just built this now taking it appart again
-  my ($cdna_coord, $intron_offset) = $cdna_position =~ m/([0-9]+)([\+\-][0-9]+)?/;
+  my ($cdna_coord, $intron_offset) = $cdna_position =~ m/(-?[0-9]+)([\+\-][0-9]+)?/;
   
 
   # Start by correcting for the stop codon
@@ -2795,6 +2859,13 @@ sub _get_cDNA_position {
     $cdna_coord -= $start_codon;
   }
   else{
+
+    # For non-coding transcripts, keep upstream coordinates in HGVS-style
+    # negative space (n.-1 is immediately 5' of transcript position 1).
+    if($cdna_coord =~ /^-?\d+$/ && $cdna_coord <= 0) {
+      $cdna_coord -= 1;
+    }
+
   	print "Checking non-coding transcript\n" if $DEBUG==1;
   }
 
