@@ -500,9 +500,12 @@ sub hgvs_variant_notation {
   my $var_name  = shift;
   my $lookup_order = shift;
 
-  # If display_start and display_end were not specified, use ref_start and ref_end
-  $display_start ||= $ref_start;
-  $display_end ||= $ref_end;
+  # If display_start and display_end were not specified, use ref_start and ref_end.
+  # Use defined() rather than ||= here - a legitimate display coordinate of 0
+  # (e.g. transcript-relative coordinates that cross the HGVS "no zero" boundary)
+  # must not be mistaken for "not specified".
+  $display_start = $ref_start unless defined $display_start;
+  $display_end = $ref_end unless defined $display_end;
 
   # the order of lookup direction for checking dup - if 1 it means first check at 5' direction and then 3'
   $lookup_order ||= 1;
@@ -573,10 +576,12 @@ sub hgvs_variant_notation {
     my @lookup_direction = $lookup_order == 1 ? (1, -1) : (-1, 1);
 
     for my $direction (@lookup_direction) {
-      # Get the same number of nucleotides preceding the insertion as the length of the insertion
-      my $prev_str = $direction == 1 ?
-        substr($ref_sequence,$ref_end,$alt_length) :
-        substr($ref_sequence,($ref_end-$alt_length),$alt_length);
+      # Get the same number of nucleotides adjacent to the insertion.
+      # For boundary coordinates (e.g. ref_end < 0), clamp to 0 so we do not
+      # accidentally wrap to the end of the string via Perl negative indexing.
+      my $start_pos = $direction == 1 ? $ref_end : ($ref_end - $alt_length);
+      $start_pos = 0 if $start_pos < 0;
+      my $prev_str = substr($ref_sequence, $start_pos, $alt_length);
 
       # If they match, this is a duplication
       if ($prev_str eq $alt_allele) {

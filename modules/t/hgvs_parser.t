@@ -882,4 +882,39 @@ dies_ok { $vf_adaptor->fetch_by_hgvs_notation( $hgvs_u ) } 'Throw on unsupported
   }
 }
 
+{
+      # Promoter-region (upstream_gene_variant) HGVSc regression checks.
+      # ENST00000360610 is an existing fixture transcript (same one already
+      # exercised above by the "coding intron downstream" dup cases), so these
+      # positions are real, already-verified GRCh37 sequence - no new genomic
+      # data needed. This covers the two promoter scenarios the feature adds:
+      # a plain upstream SNV, and a 3'-shifted upstream duplication (the
+      # single extra "A" appended to the run of 4 "A"s at 101988720-101988723
+      # is reported as a duplication of the last "A" in the run, consistent
+      # with the HGVS 3' rule). RMRP/HBB/UGT1A1 real-world pathogenic examples
+      # are additionally verified end-to-end against live VEP + ClinVar
+      # outside this DB-backed suite (see BG-tertiary repo notes) because
+      # their real coordinates fall outside this GRCh37 test fixture's
+      # sequence coverage.
+      my $vfa = $vdba->get_variationFeatureAdaptor();
+      my $ta = $cdba->get_transcriptAdaptor();
+      my $tr = $ta->fetch_by_stable_id('ENST00000360610');
+
+      my $snv_vf = $vfa->fetch_by_hgvs_notation('NC_000012.11:g.101988697T>C');
+      my $snv_tva = $snv_vf->get_all_TranscriptVariations([$tr])->[0]->get_all_alternate_BaseVariationFeatureOverlapAlleles()->[0];
+      is(
+            $snv_tva->hgvs_transcript,
+            'ENST00000360610.2:c.-152T>C',
+            'promoter-region SNV generates expected transcript HGVS'
+      );
+
+      my $dup_vf = $vfa->fetch_by_hgvs_notation('NC_000012.11:g.101988723_101988724insA');
+      my $dup_tva = $dup_vf->get_all_TranscriptVariations([$tr])->[0]->get_all_alternate_BaseVariationFeatureOverlapAlleles()->[0];
+      is(
+            $dup_tva->hgvs_transcript,
+            'ENST00000360610.2:c.-126dup',
+            'promoter-region insertion into a homopolymer run is 3\'-shifted and represented as a duplication'
+      );
+}
+
 done_testing(); 
