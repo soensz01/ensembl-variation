@@ -2679,7 +2679,9 @@ sub _var2transcript_slice_coords{
     # Pad beyond the variant's own boundary so duplication/3'-shift lookups, which
     # inspect sequence flanking the variant, have enough context even right at
     # the edge of the expanded slice.
-    my $flank_padding = 100;
+    # Scaled by ALT length so a long insertion's dup-check always has enough
+    # reference sequence to compare against (deletions just get "-"'s length, 1).
+    my $flank_padding = 100 + length($self->variation_feature_seq() || '');
     my ($orig_start, $orig_end) = ($feature_slice->start, $feature_slice->end);
 
     # Slice::expand() is strand-aware: both arguments are always given in
